@@ -27,11 +27,11 @@ Open `http://127.0.0.1:5000/` in a browser. On Command Prompt, use `set SECRET_K
 Run `init_db.py` once with `ADMIN_EMAIL` and `ADMIN_PASSWORD` set. The password is never written into source code. The script will not overwrite an existing email. Log in using those values to access `/admin` and inventory/request management.
 
 ## Deploy on Render
-1. Push this project to GitHub and create a new **Blueprint** on Render using that repository. Render detects `render.yaml` and configures the web service.
+1. Create a new **Blueprint** on Render using this GitHub repository. Render detects `render.yaml` and configures the free web service.
 2. When prompted, set `ADMIN_EMAIL` and `ADMIN_PASSWORD`. Use a unique admin email and a strong password of at least 8 characters; do not commit either value.
-3. Deploy the Blueprint. The service uses Gunicorn and a persistent disk mounted at `/var/data` for SQLite, so registered accounts and application records survive restarts and deployments.
+3. Deploy the Blueprint. The app initializes its SQLite database at startup and serves it with Gunicorn.
 
-The Blueprint uses a paid Starter web service because Render persistent disks are not available on free web services. Do not remove the disk or change `DATABASE_PATH` to the ephemeral application filesystem if you need to keep user data. The default committed `database.db` is not deployed to Render; the persistent database is initialized on the mounted disk.
+The free service uses ephemeral storage and may spin down when idle. SQLite accounts, donor records, requests, and inventory can be lost on restart, redeploy, or instance replacement. This setup is suitable for a demo only; use a paid service with persistent storage or a managed database for data that must be retained.
 
 ## Project structure
 `app.py` contains routes, validation, authorization, and database access. `init_db.py` creates the first admin. Templates provide the pages, while `static/css/style.css` and `static/js/script.js` provide shared presentation and behavior. `database.db` is created automatically on first run.
