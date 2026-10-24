@@ -7,7 +7,8 @@ from flask import Flask, flash, g, redirect, render_template, request, session, 
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE = os.path.join(BASE_DIR, "database.db")
+DATABASE = os.environ.get("DATABASE_PATH", os.path.join(BASE_DIR, "database.db"))
+os.makedirs(os.path.dirname(os.path.abspath(DATABASE)), exist_ok=True)
 BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]
 COMPATIBILITY = {
     "A+": ["A+", "A-", "O+", "O-"], "A-": ["A-", "O-"],
