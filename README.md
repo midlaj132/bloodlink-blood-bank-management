@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-# blood-bank-management-system
-=======
 # Blood Bank Management System
 
 A college-level blood bank application built with Python, Flask, SQLite, Jinja2, Bootstrap 5, and vanilla JavaScript. It demonstrates authentication, donor records, inventory, blood requests, compatibility guidance, and administrator workflows. It is educational software; real transfusion decisions must be made by qualified medical professionals.
@@ -40,4 +37,3 @@ Register a user, log in, register as a donor, and submit a request. An administr
 - `No module named flask`: activate `venv` and rerun `pip install -r requirements.txt`.
 - Admin setup exits: set `ADMIN_PASSWORD` and make sure it has at least eight characters.
 - Port in use: change the final line in `app.py` to `app.run(debug=True, port=5001)`.
->>>>>>> 690178c (Initial commit)
