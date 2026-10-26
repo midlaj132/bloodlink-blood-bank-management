@@ -72,8 +72,8 @@ def ensure_donor_columns():
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS location TEXT NOT NULL DEFAULT ''")
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS units_donated INTEGER NOT NULL DEFAULT 0")
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS sleep_hours REAL NOT NULL DEFAULT 0")
-        db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS hiv_test_result TEXT NOT NULL DEFAULT 'Pending'")
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS self_reported_hiv_status TEXT NOT NULL DEFAULT 'Not provided'")
+        db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS clinician_clearance_attested TEXT NOT NULL DEFAULT 'No'")
     else:
         columns = {row[1] for row in db.execute("PRAGMA table_info(donors)").fetchall()}
         if "location" not in columns:
@@ -82,10 +82,10 @@ def ensure_donor_columns():
             db.execute("ALTER TABLE donors ADD COLUMN units_donated INTEGER NOT NULL DEFAULT 0")
         if "sleep_hours" not in columns:
             db.execute("ALTER TABLE donors ADD COLUMN sleep_hours REAL NOT NULL DEFAULT 0")
-        if "hiv_test_result" not in columns:
-            db.execute("ALTER TABLE donors ADD COLUMN hiv_test_result TEXT NOT NULL DEFAULT 'Pending'")
         if "self_reported_hiv_status" not in columns:
             db.execute("ALTER TABLE donors ADD COLUMN self_reported_hiv_status TEXT NOT NULL DEFAULT 'Not provided'")
+        if "clinician_clearance_attested" not in columns:
+            db.execute("ALTER TABLE donors ADD COLUMN clinician_clearance_attested TEXT NOT NULL DEFAULT 'No'")
     db.commit()
 
 
@@ -117,8 +117,8 @@ def init_database():
         email TEXT NOT NULL, phone TEXT NOT NULL, blood_group TEXT NOT NULL, dob TEXT NOT NULL,
         gender TEXT NOT NULL, address TEXT NOT NULL, location TEXT NOT NULL DEFAULT '',
         last_donation TEXT, eligibility TEXT NOT NULL, units_donated INTEGER NOT NULL DEFAULT 0,
-        sleep_hours REAL NOT NULL DEFAULT 0, hiv_test_result TEXT NOT NULL DEFAULT 'Pending',
-        self_reported_hiv_status TEXT NOT NULL DEFAULT 'Not provided',
+        sleep_hours REAL NOT NULL DEFAULT 0, self_reported_hiv_status TEXT NOT NULL DEFAULT 'Not provided',
+        clinician_clearance_attested TEXT NOT NULL DEFAULT 'No',
         created_at TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""",
     f"""CREATE TABLE IF NOT EXISTS blood_inventory (
@@ -162,7 +162,7 @@ def valid_blood_group(value):
     return value in BLOOD_GROUPS
 
 
-def donor_is_eligible(dob, last_donation, sleep_hours, hiv_test_result, today=None):
+def donor_is_eligible(dob, last_donation, sleep_hours, today=None):
     today = today or date.today()
     try:
         birth_date = datetime.strptime(dob, "%Y-%m-%d").date()
@@ -174,7 +174,7 @@ def donor_is_eligible(dob, last_donation, sleep_hours, hiv_test_result, today=No
     if birth_date > today:
         return False
     age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
-    if age < 18 or not math.isfinite(sleep_hours) or sleep_hours < 6 or hiv_test_result != "Negative":
+    if age < 18 or not math.isfinite(sleep_hours) or sleep_hours < 6:
         return False
     if previous_donation is None:
         return True
@@ -189,18 +189,17 @@ def donor_is_eligible(dob, last_donation, sleep_hours, hiv_test_result, today=No
 
 
 def prepare_donor_form(form):
-    required = ["name", "email", "phone", "blood_group", "dob", "gender", "address", "location", "units_donated", "sleep_hours", "hiv_test_result"]
+    required = ["name", "email", "phone", "blood_group", "dob", "gender", "address", "location", "units_donated", "sleep_hours"]
     if not all(form.get(key, "").strip() for key in required):
         return None, "Complete all donor fields."
     if not valid_email(form["email"].strip()) or not valid_phone(form["phone"].strip()):
         return None, "Enter a valid donor email and phone number."
     if not valid_blood_group(form["blood_group"]):
         return None, "Select a valid blood group."
-    if form["hiv_test_result"] not in {"Negative", "Positive", "Pending"}:
-        return None, "Select a valid HIV screening result."
     self_reported_hiv_status = form.get("self_reported_hiv_status", "Not provided")
     if self_reported_hiv_status not in {"Not provided", "Negative", "Positive", "Unsure"}:
         return None, "Select a valid self-reported HIV status."
+    clinician_clearance_attested = form.get("clinician_clearance_attested") == "yes"
 
     try:
         birth_date = datetime.strptime(form["dob"], "%Y-%m-%d").date()
@@ -232,8 +231,8 @@ def prepare_donor_form(form):
         "last_donation": previous_donation or None,
         "units_donated": units,
         "sleep_hours": sleep_hours,
-        "hiv_test_result": form["hiv_test_result"],
         "self_reported_hiv_status": self_reported_hiv_status,
+        "clinician_clearance_attested": clinician_clearance_attested,
     }, None
 
 
@@ -358,26 +357,30 @@ def donor_add():
         if error:
             flash(error, "danger")
             return render_template("donor.html", donor=form)
-        if g.user["role"] != "admin":
-            donor_data["hiv_test_result"] = "Pending"
-        else:
+        if g.user["role"] == "admin":
             donor_data["self_reported_hiv_status"] = "Not provided"
+            if donor_data["units_donated"] > 0:
+                flash("The donor must record their own clinician-clearance confirmation before donated units can be added.", "danger")
+                return render_template("donor.html", donor=form)
+        elif donor_data["units_donated"] > 0 and not donor_data["clinician_clearance_attested"]:
+            flash("Confirm that a qualified clinician has cleared you before recording donated units.", "danger")
+            return render_template("donor.html", donor=form)
         eligible = donor_is_eligible(
             donor_data["dob"], donor_data["last_donation"],
-            donor_data["sleep_hours"], donor_data["hiv_test_result"]
+            donor_data["sleep_hours"]
         )
         if donor_data["units_donated"] > 0 and not eligible:
-            flash("Donation blocked: the donor must be at least 18, have slept at least 6 hours, be at least 6 months from their previous donation, and have a negative HIV screening result.", "danger")
+            flash("Donation blocked: the donor must be at least 18, have slept at least 6 hours, and be at least 6 months from their previous donation.", "danger")
             return render_template("donor.html", donor=form)
 
         donated_at = date.today().isoformat() if donor_data["units_donated"] > 0 else donor_data["last_donation"]
         eligibility = "Eligible" if donor_is_eligible(
-            donor_data["dob"], donated_at, donor_data["sleep_hours"], donor_data["hiv_test_result"]
+            donor_data["dob"], donated_at, donor_data["sleep_hours"]
         ) else "Not eligible"
         try:
             db = get_db()
-            db.execute("""INSERT INTO donors (user_id,name,email,phone,blood_group,dob,gender,address,location,last_donation,eligibility,units_donated,sleep_hours,hiv_test_result,self_reported_hiv_status,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.user["id"], donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["hiv_test_result"], donor_data["self_reported_hiv_status"], now()))
+            db.execute("""INSERT INTO donors (user_id,name,email,phone,blood_group,dob,gender,address,location,last_donation,eligibility,units_donated,sleep_hours,self_reported_hiv_status,clinician_clearance_attested,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.user["id"], donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["self_reported_hiv_status"], "Yes" if donor_data["clinician_clearance_attested"] else "No", now()))
             db.commit()
         except (sqlite3.IntegrityError, psycopg.IntegrityError):
             db.rollback()
@@ -405,26 +408,32 @@ def donor_edit(donor_id):
         if error:
             flash(error, "danger")
             return render_template("donor.html", donor=form)
-        if g.user["role"] != "admin":
-            donor_data["hiv_test_result"] = donor["hiv_test_result"]
-        else:
+        if g.user["role"] == "admin":
             donor_data["self_reported_hiv_status"] = donor["self_reported_hiv_status"]
 
         previous_units = donor["units_donated"]
         additional_units = donor_data["units_donated"] - previous_units
+        if additional_units > 0 and g.user["role"] == "admin":
+            flash("The donor must record their own clinician-clearance confirmation before additional donated units can be added.", "danger")
+            return render_template("donor.html", donor=form)
+        if additional_units > 0 and not donor_data["clinician_clearance_attested"]:
+            flash("Confirm that a qualified clinician has cleared you before recording additional donated units.", "danger")
+            return render_template("donor.html", donor=form)
         if additional_units > 0 and not donor_is_eligible(
-            donor_data["dob"], donor["last_donation"],
-            donor_data["sleep_hours"], donor_data["hiv_test_result"]
+            donor_data["dob"], donor["last_donation"], donor_data["sleep_hours"]
         ):
-            flash("Donation blocked: the donor must be at least 18, have slept at least 6 hours, be at least 6 months from their previous donation, and have a negative HIV screening result.", "danger")
+            flash("Donation blocked: the donor must be at least 18, have slept at least 6 hours, and be at least 6 months from their previous donation.", "danger")
             return render_template("donor.html", donor=form)
 
         donated_at = date.today().isoformat() if additional_units > 0 else donor["last_donation"]
         eligibility = "Eligible" if donor_is_eligible(
-            donor_data["dob"], donated_at, donor_data["sleep_hours"], donor_data["hiv_test_result"]
+            donor_data["dob"], donated_at, donor_data["sleep_hours"]
         ) else "Not eligible"
+        clinician_clearance_attested = donor["clinician_clearance_attested"]
+        if additional_units > 0:
+            clinician_clearance_attested = "Yes"
         previous_group = donor["blood_group"]
-        db.execute("""UPDATE donors SET name=?,email=?,phone=?,blood_group=?,dob=?,gender=?,address=?,location=?,last_donation=?,eligibility=?,units_donated=?,sleep_hours=?,hiv_test_result=?,self_reported_hiv_status=? WHERE id=?""", (donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["hiv_test_result"], donor_data["self_reported_hiv_status"], donor_id))
+        db.execute("""UPDATE donors SET name=?,email=?,phone=?,blood_group=?,dob=?,gender=?,address=?,location=?,last_donation=?,eligibility=?,units_donated=?,sleep_hours=?,self_reported_hiv_status=?,clinician_clearance_attested=? WHERE id=?""", (donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["self_reported_hiv_status"], clinician_clearance_attested, donor_id))
         db.commit()
         if previous_group == donor_data["blood_group"]:
             adjust_inventory_for_group(donor_data["blood_group"], additional_units)

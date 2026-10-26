@@ -17,7 +17,7 @@
           <div class="alert alert-{{ category }}">{{ message }}</div>
         {% endfor %}
       {% endwith %}
-      <p class="text-muted">Donation is allowed only when the donor is at least 18, reports 6 or more hours of sleep, is at least 6 months from their previous donation, and has a negative HIV screening result verified by an administrator. Your self-reported HIV status is not a test result and cannot be used to approve a donation. This application does not perform medical testing; qualified blood-bank staff must make the final decision.</p>
+      <p class="text-muted">This application does not determine medical eligibility or perform testing. Consult a qualified clinician before donating; record donated units only after a clinician has cleared you. Your self-reported HIV status is not a test result and does not determine eligibility. The app cannot verify a clinician's decision.</p>
       <form method="post" class="row g-3">
         {% for label,name,type in [('Full name','name','text'),('Email','email','email'),('Phone','phone','text'),('Date of birth','dob','date')] %}
           <div class="col-md-6">
@@ -68,23 +68,20 @@
                 {% endfor %}
               </select>
             </label>
-            <small class="text-muted">This is optional and does not replace a test verified by staff.</small>
+            <small class="text-muted">Optional; this is not a test result or medical clearance.</small>
           {% endif %}
         </div>
         <div class="col-md-6">
           {% if g.user['role'] == 'admin' %}
-            <label class="form-label">Verified HIV screening result
-              <select class="form-select" name="hiv_test_result" required>
-                {% for result in ['Pending','Negative','Positive'] %}
-                  <option {% if donor and donor['hiv_test_result'] == result %}selected{% elif not donor and result == 'Pending' %}selected{% endif %}>{{ result }}</option>
-                {% endfor %}
-              </select>
+            <label class="form-label">Donor clinician-clearance confirmation
+              <input class="form-control" type="text" value="{{ donor['clinician_clearance_attested'] if donor else 'Not provided' }}" readonly>
             </label>
           {% else %}
-            <label class="form-label">Staff-verified HIV screening
-              <input class="form-control" type="text" value="{{ donor['hiv_test_result'] if donor else 'Pending staff verification' }}" readonly>
-              <input type="hidden" name="hiv_test_result" value="{{ donor['hiv_test_result'] if donor else 'Pending' }}">
-            </label>
+            <div class="form-check mt-4">
+              <input class="form-check-input" type="checkbox" id="clinician-clearance" name="clinician_clearance_attested" value="yes" {% if donor and donor['clinician_clearance_attested'] == 'Yes' %}checked{% endif %}>
+              <label class="form-check-label" for="clinician-clearance">I confirm that a qualified clinician has cleared me for this donation.</label>
+            </div>
+            <small class="text-muted">This confirmation is required to add donated units. It is your attestation and is not verified by the app.</small>
           {% endif %}
         </div>
         <div class="col-md-6">
