@@ -17,7 +17,7 @@
           <div class="alert alert-{{ category }}">{{ message }}</div>
         {% endfor %}
       {% endwith %}
-      <p class="text-muted">This application does not determine medical eligibility or perform testing. Consult a qualified clinician before donating; record donated units only after a clinician has cleared you. Your self-reported HIV status is not a test result and does not determine eligibility. The app cannot verify a clinician's decision.</p>
+      <p class="text-muted">This application does not determine medical eligibility or perform testing. Consult qualified medical professionals before donating; this educational app is not a substitute for professional screening.</p>
       <form method="post" class="row g-3">
         {% for label,name,type in [('Full name','name','text'),('Email','email','email'),('Phone','phone','text'),('Date of birth','dob','date')] %}
           <div class="col-md-6">
@@ -54,35 +54,6 @@
           <label class="form-label">Sleep in the previous night (hours)
             <input class="form-control" type="number" min="0" max="24" step="0.5" name="sleep_hours" value="{{ donor['sleep_hours'] if donor else '' }}" required>
           </label>
-        </div>
-        <div class="col-md-6">
-          {% if g.user['role'] == 'admin' %}
-            <label class="form-label">Donor self-reported HIV status
-              <input class="form-control" type="text" value="{{ donor['self_reported_hiv_status'] if donor else 'Not provided' }}" readonly>
-            </label>
-          {% else %}
-            <label class="form-label">Self-reported HIV status (optional)
-              <select class="form-select" name="self_reported_hiv_status">
-                {% for status in ['Not provided','Negative','Positive','Unsure'] %}
-                  <option {% if donor and donor['self_reported_hiv_status'] == status %}selected{% elif not donor and status == 'Not provided' %}selected{% endif %}>{{ status }}</option>
-                {% endfor %}
-              </select>
-            </label>
-            <small class="text-muted">Optional; this is not a test result or medical clearance.</small>
-          {% endif %}
-        </div>
-        <div class="col-md-6">
-          {% if g.user['role'] == 'admin' %}
-            <label class="form-label">Donor clinician-clearance confirmation
-              <input class="form-control" type="text" value="{{ donor['clinician_clearance_attested'] if donor else 'Not provided' }}" readonly>
-            </label>
-          {% else %}
-            <div class="form-check mt-4">
-              <input class="form-check-input" type="checkbox" id="clinician-clearance" name="clinician_clearance_attested" value="yes" {% if donor and donor['clinician_clearance_attested'] == 'Yes' %}checked{% endif %}>
-              <label class="form-check-label" for="clinician-clearance">I confirm that a qualified clinician has cleared me for this donation.</label>
-            </div>
-            <small class="text-muted">This confirmation is required to add donated units. It is your attestation and is not verified by the app.</small>
-          {% endif %}
         </div>
         <div class="col-md-6">
           <label class="form-label">{{ 'Total units donated' if donor else 'Units to donate' }}

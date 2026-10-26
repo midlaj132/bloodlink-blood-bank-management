@@ -5,7 +5,7 @@ A college-level blood bank application built with Python, Flask, SQLite for loca
 ## Features
 - Registration, login, logout, hashed passwords, sessions, and role-based admin authorization.
 - Donor registration, search, filters, editing, and ownership checks.
-- Donation recording checks for minimum age 18, at least 6 hours' sleep, a 6-month interval after the previous donation, and a donor attestation that a qualified clinician has cleared them. The app does not assess HIV status or verify clinical clearance.
+- Donation recording checks for minimum age 18, at least 6 hours' sleep, and a 6-month interval after the previous donation. The app does not determine medical eligibility or perform screening.
 - Eight blood groups with non-negative inventory controls.
 - Requests with Pending, Approved, Rejected, and Completed statuses.
 - Compatible blood group display and automatic inventory deduction on completion.
@@ -57,7 +57,7 @@ Vercel requires both `DATABASE_URL` and `SECRET_KEY`; it will fail clearly rathe
 ## Usage
 Register a user, log in, register as a donor, and submit a request. An administrator can add inventory, approve requests, and complete approved requests. Completing a request checks compatible stock and deducts units without allowing a negative balance.
 
-Donors can optionally self-report Negative, Positive, or Unsure; this information does not affect donation recording and is not a test result. The app does not collect staff-verified HIV results or determine medical eligibility. A donor must confirm that a qualified clinician cleared them before donated units can be recorded, but the app cannot verify that confirmation. This is an educational workflow, not medical advice or a substitute for blood-bank screening and eligibility decisions by qualified medical professionals; do not use it to make real-world transfusion or donor-clearance decisions.
+The app does not perform medical screening or determine medical eligibility. This is an educational workflow, not medical advice or a substitute for blood-bank screening and eligibility decisions by qualified medical professionals; do not use it to make real-world transfusion or donor-clearance decisions.
 
 ## Common issues
 - `python is not recognized`: install Python 3 and enable “Add Python to PATH”, then reopen VS Code.

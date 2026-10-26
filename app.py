@@ -72,8 +72,6 @@ def ensure_donor_columns():
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS location TEXT NOT NULL DEFAULT ''")
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS units_donated INTEGER NOT NULL DEFAULT 0")
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS sleep_hours REAL NOT NULL DEFAULT 0")
-        db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS self_reported_hiv_status TEXT NOT NULL DEFAULT 'Not provided'")
-        db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS clinician_clearance_attested TEXT NOT NULL DEFAULT 'No'")
     else:
         columns = {row[1] for row in db.execute("PRAGMA table_info(donors)").fetchall()}
         if "location" not in columns:
@@ -82,10 +80,6 @@ def ensure_donor_columns():
             db.execute("ALTER TABLE donors ADD COLUMN units_donated INTEGER NOT NULL DEFAULT 0")
         if "sleep_hours" not in columns:
             db.execute("ALTER TABLE donors ADD COLUMN sleep_hours REAL NOT NULL DEFAULT 0")
-        if "self_reported_hiv_status" not in columns:
-            db.execute("ALTER TABLE donors ADD COLUMN self_reported_hiv_status TEXT NOT NULL DEFAULT 'Not provided'")
-        if "clinician_clearance_attested" not in columns:
-            db.execute("ALTER TABLE donors ADD COLUMN clinician_clearance_attested TEXT NOT NULL DEFAULT 'No'")
     db.commit()
 
 
@@ -117,8 +111,7 @@ def init_database():
         email TEXT NOT NULL, phone TEXT NOT NULL, blood_group TEXT NOT NULL, dob TEXT NOT NULL,
         gender TEXT NOT NULL, address TEXT NOT NULL, location TEXT NOT NULL DEFAULT '',
         last_donation TEXT, eligibility TEXT NOT NULL, units_donated INTEGER NOT NULL DEFAULT 0,
-        sleep_hours REAL NOT NULL DEFAULT 0, self_reported_hiv_status TEXT NOT NULL DEFAULT 'Not provided',
-        clinician_clearance_attested TEXT NOT NULL DEFAULT 'No',
+        sleep_hours REAL NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""",
     f"""CREATE TABLE IF NOT EXISTS blood_inventory (
@@ -196,11 +189,6 @@ def prepare_donor_form(form):
         return None, "Enter a valid donor email and phone number."
     if not valid_blood_group(form["blood_group"]):
         return None, "Select a valid blood group."
-    self_reported_hiv_status = form.get("self_reported_hiv_status", "Not provided")
-    if self_reported_hiv_status not in {"Not provided", "Negative", "Positive", "Unsure"}:
-        return None, "Select a valid self-reported HIV status."
-    clinician_clearance_attested = form.get("clinician_clearance_attested") == "yes"
-
     try:
         birth_date = datetime.strptime(form["dob"], "%Y-%m-%d").date()
         previous_donation = form.get("last_donation", "").strip()
@@ -231,8 +219,6 @@ def prepare_donor_form(form):
         "last_donation": previous_donation or None,
         "units_donated": units,
         "sleep_hours": sleep_hours,
-        "self_reported_hiv_status": self_reported_hiv_status,
-        "clinician_clearance_attested": clinician_clearance_attested,
     }, None
 
 
@@ -357,14 +343,6 @@ def donor_add():
         if error:
             flash(error, "danger")
             return render_template("donor.html", donor=form)
-        if g.user["role"] == "admin":
-            donor_data["self_reported_hiv_status"] = "Not provided"
-            if donor_data["units_donated"] > 0:
-                flash("The donor must record their own clinician-clearance confirmation before donated units can be added.", "danger")
-                return render_template("donor.html", donor=form)
-        elif donor_data["units_donated"] > 0 and not donor_data["clinician_clearance_attested"]:
-            flash("Confirm that a qualified clinician has cleared you before recording donated units.", "danger")
-            return render_template("donor.html", donor=form)
         eligible = donor_is_eligible(
             donor_data["dob"], donor_data["last_donation"],
             donor_data["sleep_hours"]
@@ -379,8 +357,8 @@ def donor_add():
         ) else "Not eligible"
         try:
             db = get_db()
-            db.execute("""INSERT INTO donors (user_id,name,email,phone,blood_group,dob,gender,address,location,last_donation,eligibility,units_donated,sleep_hours,self_reported_hiv_status,clinician_clearance_attested,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.user["id"], donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["self_reported_hiv_status"], "Yes" if donor_data["clinician_clearance_attested"] else "No", now()))
+            db.execute("""INSERT INTO donors (user_id,name,email,phone,blood_group,dob,gender,address,location,last_donation,eligibility,units_donated,sleep_hours,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.user["id"], donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], now()))
             db.commit()
         except (sqlite3.IntegrityError, psycopg.IntegrityError):
             db.rollback()
@@ -408,17 +386,8 @@ def donor_edit(donor_id):
         if error:
             flash(error, "danger")
             return render_template("donor.html", donor=form)
-        if g.user["role"] == "admin":
-            donor_data["self_reported_hiv_status"] = donor["self_reported_hiv_status"]
-
         previous_units = donor["units_donated"]
         additional_units = donor_data["units_donated"] - previous_units
-        if additional_units > 0 and g.user["role"] == "admin":
-            flash("The donor must record their own clinician-clearance confirmation before additional donated units can be added.", "danger")
-            return render_template("donor.html", donor=form)
-        if additional_units > 0 and not donor_data["clinician_clearance_attested"]:
-            flash("Confirm that a qualified clinician has cleared you before recording additional donated units.", "danger")
-            return render_template("donor.html", donor=form)
         if additional_units > 0 and not donor_is_eligible(
             donor_data["dob"], donor["last_donation"], donor_data["sleep_hours"]
         ):
@@ -429,11 +398,8 @@ def donor_edit(donor_id):
         eligibility = "Eligible" if donor_is_eligible(
             donor_data["dob"], donated_at, donor_data["sleep_hours"]
         ) else "Not eligible"
-        clinician_clearance_attested = donor["clinician_clearance_attested"]
-        if additional_units > 0:
-            clinician_clearance_attested = "Yes"
         previous_group = donor["blood_group"]
-        db.execute("""UPDATE donors SET name=?,email=?,phone=?,blood_group=?,dob=?,gender=?,address=?,location=?,last_donation=?,eligibility=?,units_donated=?,sleep_hours=?,self_reported_hiv_status=?,clinician_clearance_attested=? WHERE id=?""", (donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["self_reported_hiv_status"], clinician_clearance_attested, donor_id))
+        db.execute("""UPDATE donors SET name=?,email=?,phone=?,blood_group=?,dob=?,gender=?,address=?,location=?,last_donation=?,eligibility=?,units_donated=?,sleep_hours=? WHERE id=?""", (donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_id))
         db.commit()
         if previous_group == donor_data["blood_group"]:
             adjust_inventory_for_group(donor_data["blood_group"], additional_units)
