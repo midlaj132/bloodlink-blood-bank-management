@@ -1,8 +1,10 @@
+import calendar
+import math
 import os
 import re
 import sqlite3
 from functools import wraps
-from datetime import datetime
+from datetime import date, datetime
 from flask import Flask, flash, g, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 import psycopg
@@ -69,12 +71,18 @@ def ensure_donor_columns():
     if USE_POSTGRES:
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS location TEXT NOT NULL DEFAULT ''")
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS units_donated INTEGER NOT NULL DEFAULT 0")
+        db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS sleep_hours REAL NOT NULL DEFAULT 0")
+        db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS hiv_test_result TEXT NOT NULL DEFAULT 'Pending'")
     else:
         columns = {row[1] for row in db.execute("PRAGMA table_info(donors)").fetchall()}
         if "location" not in columns:
             db.execute("ALTER TABLE donors ADD COLUMN location TEXT NOT NULL DEFAULT ''")
         if "units_donated" not in columns:
             db.execute("ALTER TABLE donors ADD COLUMN units_donated INTEGER NOT NULL DEFAULT 0")
+        if "sleep_hours" not in columns:
+            db.execute("ALTER TABLE donors ADD COLUMN sleep_hours REAL NOT NULL DEFAULT 0")
+        if "hiv_test_result" not in columns:
+            db.execute("ALTER TABLE donors ADD COLUMN hiv_test_result TEXT NOT NULL DEFAULT 'Pending'")
     db.commit()
 
 
@@ -106,6 +114,7 @@ def init_database():
         email TEXT NOT NULL, phone TEXT NOT NULL, blood_group TEXT NOT NULL, dob TEXT NOT NULL,
         gender TEXT NOT NULL, address TEXT NOT NULL, location TEXT NOT NULL DEFAULT '',
         last_donation TEXT, eligibility TEXT NOT NULL, units_donated INTEGER NOT NULL DEFAULT 0,
+        sleep_hours REAL NOT NULL DEFAULT 0, hiv_test_result TEXT NOT NULL DEFAULT 'Pending',
         created_at TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""",
     f"""CREATE TABLE IF NOT EXISTS blood_inventory (
@@ -147,6 +156,77 @@ def valid_phone(value):
 
 def valid_blood_group(value):
     return value in BLOOD_GROUPS
+
+
+def donor_is_eligible(dob, last_donation, sleep_hours, hiv_test_result, today=None):
+    today = today or date.today()
+    try:
+        birth_date = datetime.strptime(dob, "%Y-%m-%d").date()
+        previous_donation = datetime.strptime(last_donation, "%Y-%m-%d").date() if last_donation else None
+        sleep_hours = float(sleep_hours)
+    except (TypeError, ValueError):
+        return False
+
+    if birth_date > today:
+        return False
+    age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+    if age < 18 or not math.isfinite(sleep_hours) or sleep_hours < 6 or hiv_test_result != "Negative":
+        return False
+    if previous_donation is None:
+        return True
+    if previous_donation > today:
+        return False
+
+    eligible_date_month = previous_donation.month + 6
+    eligible_year = previous_donation.year + (eligible_date_month - 1) // 12
+    eligible_month = (eligible_date_month - 1) % 12 + 1
+    eligible_day = min(previous_donation.day, calendar.monthrange(eligible_year, eligible_month)[1])
+    return today >= date(eligible_year, eligible_month, eligible_day)
+
+
+def prepare_donor_form(form):
+    required = ["name", "email", "phone", "blood_group", "dob", "gender", "address", "location", "units_donated", "sleep_hours", "hiv_test_result"]
+    if not all(form.get(key, "").strip() for key in required):
+        return None, "Complete all donor fields."
+    if not valid_email(form["email"].strip()) or not valid_phone(form["phone"].strip()):
+        return None, "Enter a valid donor email and phone number."
+    if not valid_blood_group(form["blood_group"]):
+        return None, "Select a valid blood group."
+    if form["hiv_test_result"] not in {"Negative", "Positive", "Pending"}:
+        return None, "Select a valid HIV screening result."
+
+    try:
+        birth_date = datetime.strptime(form["dob"], "%Y-%m-%d").date()
+        previous_donation = form.get("last_donation", "").strip()
+        previous_donation_date = datetime.strptime(previous_donation, "%Y-%m-%d").date() if previous_donation else None
+        units = int(form["units_donated"])
+        sleep_hours = float(form["sleep_hours"])
+    except ValueError:
+        return None, "Enter valid dates, donated units, and sleep hours."
+
+    if birth_date > date.today():
+        return None, "Date of birth cannot be in the future."
+    if previous_donation_date and previous_donation_date > date.today():
+        return None, "Previous donation date cannot be in the future."
+    if units < 0:
+        return None, "Donated units cannot be negative."
+    if not math.isfinite(sleep_hours) or not 0 <= sleep_hours <= 24:
+        return None, "Sleep hours must be between 0 and 24."
+
+    return {
+        "name": form["name"].strip(),
+        "email": form["email"].strip().lower(),
+        "phone": form["phone"].strip(),
+        "blood_group": form["blood_group"],
+        "dob": form["dob"],
+        "gender": form["gender"],
+        "address": form["address"].strip(),
+        "location": form["location"].strip(),
+        "last_donation": previous_donation or None,
+        "units_donated": units,
+        "sleep_hours": sleep_hours,
+        "hiv_test_result": form["hiv_test_result"],
+    }, None
 
 
 def login_required(view):
@@ -266,29 +346,36 @@ def dashboard():
 def donor_add():
     if request.method == "POST":
         form = request.form
-        required = ["name", "email", "phone", "blood_group", "dob", "gender", "address", "location", "eligibility", "units_donated"]
-        if not all(form.get(key, "").strip() for key in required):
-            flash("Complete all donor fields.", "danger")
-        elif not valid_email(form["email"].strip()) or not valid_phone(form["phone"].strip()):
-            flash("Enter a valid donor email and phone number.", "danger")
-        elif not valid_blood_group(form["blood_group"]):
-            flash("Select a valid blood group.", "danger")
-        else:
-            try:
-                units = int(form["units_donated"])
-            except ValueError:
-                flash("Enter a valid number of blood units donated.", "danger")
-                return render_template("donor.html", donor=None)
-            if units < 0:
-                flash("Donated units cannot be negative.", "danger")
-                return render_template("donor.html", donor=None)
+        donor_data, error = prepare_donor_form(form)
+        if error:
+            flash(error, "danger")
+            return render_template("donor.html", donor=form)
+        if g.user["role"] != "admin":
+            donor_data["hiv_test_result"] = "Pending"
+        eligible = donor_is_eligible(
+            donor_data["dob"], donor_data["last_donation"],
+            donor_data["sleep_hours"], donor_data["hiv_test_result"]
+        )
+        if donor_data["units_donated"] > 0 and not eligible:
+            flash("Donation blocked: the donor must be at least 18, have slept at least 6 hours, be at least 6 months from their previous donation, and have a negative HIV screening result.", "danger")
+            return render_template("donor.html", donor=form)
+
+        donated_at = date.today().isoformat() if donor_data["units_donated"] > 0 else donor_data["last_donation"]
+        eligibility = "Eligible" if donor_is_eligible(
+            donor_data["dob"], donated_at, donor_data["sleep_hours"], donor_data["hiv_test_result"]
+        ) else "Not eligible"
+        try:
             db = get_db()
-            db.execute("""INSERT INTO donors (user_id,name,email,phone,blood_group,dob,gender,address,location,last_donation,eligibility,units_donated,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.user["id"], form["name"].strip(), form["email"].strip().lower(), form["phone"].strip(), form["blood_group"], form["dob"], form["gender"], form["address"].strip(), form["location"].strip(), form.get("last_donation") or None, form["eligibility"], units, now()))
+            db.execute("""INSERT INTO donors (user_id,name,email,phone,blood_group,dob,gender,address,location,last_donation,eligibility,units_donated,sleep_hours,hiv_test_result,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.user["id"], donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["hiv_test_result"], now()))
             db.commit()
-            adjust_inventory_for_group(form["blood_group"], units)
-            flash("Donor registered successfully.", "success")
-            return redirect(url_for("donors"))
+        except (sqlite3.IntegrityError, psycopg.IntegrityError):
+            db.rollback()
+            flash("Donor record could not be saved. Please check the donor details.", "danger")
+            return render_template("donor.html", donor=form)
+        adjust_inventory_for_group(donor_data["blood_group"], donor_data["units_donated"])
+        flash("Donor registered successfully.", "success")
+        return redirect(url_for("donors"))
     return render_template("donor.html", donor=None)
 
 
@@ -304,33 +391,36 @@ def donor_edit(donor_id):
         return redirect(url_for("donors"))
     if request.method == "POST":
         form = request.form
-        required = ["name", "email", "phone", "blood_group", "dob", "gender", "address", "location", "eligibility", "units_donated"]
-        if not all(form.get(key, "").strip() for key in required):
-            flash("Complete all donor fields.", "danger")
-        elif not valid_email(form["email"].strip()) or not valid_phone(form["phone"].strip()):
-            flash("Enter a valid donor email and phone number.", "danger")
-        elif not valid_blood_group(form["blood_group"]):
-            flash("Select a valid blood group.", "danger")
+        donor_data, error = prepare_donor_form(form)
+        if error:
+            flash(error, "danger")
+            return render_template("donor.html", donor=form)
+        if g.user["role"] != "admin":
+            donor_data["hiv_test_result"] = donor["hiv_test_result"]
+
+        previous_units = donor["units_donated"]
+        additional_units = donor_data["units_donated"] - previous_units
+        if additional_units > 0 and not donor_is_eligible(
+            donor_data["dob"], donor["last_donation"],
+            donor_data["sleep_hours"], donor_data["hiv_test_result"]
+        ):
+            flash("Donation blocked: the donor must be at least 18, have slept at least 6 hours, be at least 6 months from their previous donation, and have a negative HIV screening result.", "danger")
+            return render_template("donor.html", donor=form)
+
+        donated_at = date.today().isoformat() if additional_units > 0 else donor["last_donation"]
+        eligibility = "Eligible" if donor_is_eligible(
+            donor_data["dob"], donated_at, donor_data["sleep_hours"], donor_data["hiv_test_result"]
+        ) else "Not eligible"
+        previous_group = donor["blood_group"]
+        db.execute("""UPDATE donors SET name=?,email=?,phone=?,blood_group=?,dob=?,gender=?,address=?,location=?,last_donation=?,eligibility=?,units_donated=?,sleep_hours=?,hiv_test_result=? WHERE id=?""", (donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["hiv_test_result"], donor_id))
+        db.commit()
+        if previous_group == donor_data["blood_group"]:
+            adjust_inventory_for_group(donor_data["blood_group"], additional_units)
         else:
-            try:
-                units = int(form["units_donated"])
-            except ValueError:
-                flash("Enter a valid number of blood units donated.", "danger")
-                return render_template("donor.html", donor=donor)
-            if units < 0:
-                flash("Donated units cannot be negative.", "danger")
-                return render_template("donor.html", donor=donor)
-            prev_group = donor["blood_group"]
-            prev_units = donor["units_donated"]
-            db.execute("""UPDATE donors SET name=?,email=?,phone=?,blood_group=?,dob=?,gender=?,address=?,location=?,last_donation=?,eligibility=?,units_donated=? WHERE id=?""", (form["name"].strip(), form["email"].strip().lower(), form["phone"].strip(), form["blood_group"], form["dob"], form["gender"], form["address"].strip(), form["location"].strip(), form.get("last_donation") or None, form["eligibility"], units, donor_id))
-            db.commit()
-            if prev_group == form["blood_group"]:
-                adjust_inventory_for_group(form["blood_group"], units - prev_units)
-            else:
-                adjust_inventory_for_group(prev_group, -prev_units)
-                adjust_inventory_for_group(form["blood_group"], units)
-            flash("Donor record updated.", "success")
-            return redirect(url_for("donors"))
+            adjust_inventory_for_group(previous_group, -previous_units)
+            adjust_inventory_for_group(donor_data["blood_group"], donor_data["units_donated"])
+        flash("Donor record updated.", "success")
+        return redirect(url_for("donors"))
     return render_template("donor.html", donor=donor)
 
 

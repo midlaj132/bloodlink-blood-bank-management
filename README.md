@@ -5,6 +5,7 @@ A college-level blood bank application built with Python, Flask, SQLite for loca
 ## Features
 - Registration, login, logout, hashed passwords, sessions, and role-based admin authorization.
 - Donor registration, search, filters, editing, and ownership checks.
+- Donation eligibility checks for minimum age 18, at least 6 hours' sleep, a 6-month interval after the previous donation, and administrator-verified negative HIV screening.
 - Eight blood groups with non-negative inventory controls.
 - Requests with Pending, Approved, Rejected, and Completed statuses.
 - Compatible blood group display and automatic inventory deduction on completion.
@@ -55,6 +56,8 @@ Vercel requires both `DATABASE_URL` and `SECRET_KEY`; it will fail clearly rathe
 
 ## Usage
 Register a user, log in, register as a donor, and submit a request. An administrator can add inventory, approve requests, and complete approved requests. Completing a request checks compatible stock and deducts units without allowing a negative balance.
+
+Donated units are added to inventory only when all configured donor eligibility checks pass. HIV screening results can only be set by an administrator, and are not shown in the donor list. These are educational workflow checks, not medical advice or a substitute for screening and eligibility decisions by qualified blood-bank staff.
 
 ## Common issues
 - `python is not recognized`: install Python 3 and enable “Add Python to PATH”, then reopen VS Code.
