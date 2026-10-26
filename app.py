@@ -73,6 +73,7 @@ def ensure_donor_columns():
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS units_donated INTEGER NOT NULL DEFAULT 0")
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS sleep_hours REAL NOT NULL DEFAULT 0")
         db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS hiv_test_result TEXT NOT NULL DEFAULT 'Pending'")
+        db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS self_reported_hiv_status TEXT NOT NULL DEFAULT 'Not provided'")
     else:
         columns = {row[1] for row in db.execute("PRAGMA table_info(donors)").fetchall()}
         if "location" not in columns:
@@ -83,6 +84,8 @@ def ensure_donor_columns():
             db.execute("ALTER TABLE donors ADD COLUMN sleep_hours REAL NOT NULL DEFAULT 0")
         if "hiv_test_result" not in columns:
             db.execute("ALTER TABLE donors ADD COLUMN hiv_test_result TEXT NOT NULL DEFAULT 'Pending'")
+        if "self_reported_hiv_status" not in columns:
+            db.execute("ALTER TABLE donors ADD COLUMN self_reported_hiv_status TEXT NOT NULL DEFAULT 'Not provided'")
     db.commit()
 
 
@@ -115,6 +118,7 @@ def init_database():
         gender TEXT NOT NULL, address TEXT NOT NULL, location TEXT NOT NULL DEFAULT '',
         last_donation TEXT, eligibility TEXT NOT NULL, units_donated INTEGER NOT NULL DEFAULT 0,
         sleep_hours REAL NOT NULL DEFAULT 0, hiv_test_result TEXT NOT NULL DEFAULT 'Pending',
+        self_reported_hiv_status TEXT NOT NULL DEFAULT 'Not provided',
         created_at TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )""",
     f"""CREATE TABLE IF NOT EXISTS blood_inventory (
@@ -194,6 +198,9 @@ def prepare_donor_form(form):
         return None, "Select a valid blood group."
     if form["hiv_test_result"] not in {"Negative", "Positive", "Pending"}:
         return None, "Select a valid HIV screening result."
+    self_reported_hiv_status = form.get("self_reported_hiv_status", "Not provided")
+    if self_reported_hiv_status not in {"Not provided", "Negative", "Positive", "Unsure"}:
+        return None, "Select a valid self-reported HIV status."
 
     try:
         birth_date = datetime.strptime(form["dob"], "%Y-%m-%d").date()
@@ -226,6 +233,7 @@ def prepare_donor_form(form):
         "units_donated": units,
         "sleep_hours": sleep_hours,
         "hiv_test_result": form["hiv_test_result"],
+        "self_reported_hiv_status": self_reported_hiv_status,
     }, None
 
 
@@ -352,6 +360,8 @@ def donor_add():
             return render_template("donor.html", donor=form)
         if g.user["role"] != "admin":
             donor_data["hiv_test_result"] = "Pending"
+        else:
+            donor_data["self_reported_hiv_status"] = "Not provided"
         eligible = donor_is_eligible(
             donor_data["dob"], donor_data["last_donation"],
             donor_data["sleep_hours"], donor_data["hiv_test_result"]
@@ -366,8 +376,8 @@ def donor_add():
         ) else "Not eligible"
         try:
             db = get_db()
-            db.execute("""INSERT INTO donors (user_id,name,email,phone,blood_group,dob,gender,address,location,last_donation,eligibility,units_donated,sleep_hours,hiv_test_result,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.user["id"], donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["hiv_test_result"], now()))
+            db.execute("""INSERT INTO donors (user_id,name,email,phone,blood_group,dob,gender,address,location,last_donation,eligibility,units_donated,sleep_hours,hiv_test_result,self_reported_hiv_status,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.user["id"], donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["hiv_test_result"], donor_data["self_reported_hiv_status"], now()))
             db.commit()
         except (sqlite3.IntegrityError, psycopg.IntegrityError):
             db.rollback()
@@ -397,6 +407,8 @@ def donor_edit(donor_id):
             return render_template("donor.html", donor=form)
         if g.user["role"] != "admin":
             donor_data["hiv_test_result"] = donor["hiv_test_result"]
+        else:
+            donor_data["self_reported_hiv_status"] = donor["self_reported_hiv_status"]
 
         previous_units = donor["units_donated"]
         additional_units = donor_data["units_donated"] - previous_units
@@ -412,7 +424,7 @@ def donor_edit(donor_id):
             donor_data["dob"], donated_at, donor_data["sleep_hours"], donor_data["hiv_test_result"]
         ) else "Not eligible"
         previous_group = donor["blood_group"]
-        db.execute("""UPDATE donors SET name=?,email=?,phone=?,blood_group=?,dob=?,gender=?,address=?,location=?,last_donation=?,eligibility=?,units_donated=?,sleep_hours=?,hiv_test_result=? WHERE id=?""", (donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["hiv_test_result"], donor_id))
+        db.execute("""UPDATE donors SET name=?,email=?,phone=?,blood_group=?,dob=?,gender=?,address=?,location=?,last_donation=?,eligibility=?,units_donated=?,sleep_hours=?,hiv_test_result=?,self_reported_hiv_status=? WHERE id=?""", (donor_data["name"], donor_data["email"], donor_data["phone"], donor_data["blood_group"], donor_data["dob"], donor_data["gender"], donor_data["address"], donor_data["location"], donated_at, eligibility, donor_data["units_donated"], donor_data["sleep_hours"], donor_data["hiv_test_result"], donor_data["self_reported_hiv_status"], donor_id))
         db.commit()
         if previous_group == donor_data["blood_group"]:
             adjust_inventory_for_group(donor_data["blood_group"], additional_units)
