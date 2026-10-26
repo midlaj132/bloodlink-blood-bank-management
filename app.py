@@ -5,10 +5,17 @@ from functools import wraps
 from datetime import datetime
 from flask import Flask, flash, g, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
+import psycopg
+from psycopg.rows import dict_row
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE_URL = os.environ.get("DATABASE_URL")
+USE_POSTGRES = bool(DATABASE_URL)
+if os.environ.get("VERCEL") and not USE_POSTGRES:
+    raise RuntimeError("Set DATABASE_URL to a persistent PostgreSQL connection string in Vercel.")
 DATABASE = os.environ.get("DATABASE_PATH", os.path.join(BASE_DIR, "database.db"))
-os.makedirs(os.path.dirname(os.path.abspath(DATABASE)), exist_ok=True)
+if not USE_POSTGRES:
+    os.makedirs(os.path.dirname(os.path.abspath(DATABASE)), exist_ok=True)
 BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]
 COMPATIBILITY = {
     "A+": ["A+", "A-", "O+", "O-"], "A-": ["A-", "O-"],
@@ -18,13 +25,35 @@ COMPATIBILITY = {
 }
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "local-development-change-this")
+if os.environ.get("VERCEL") and not os.environ.get("SECRET_KEY"):
+    raise RuntimeError("Set SECRET_KEY in the Vercel project environment variables.")
+
+
+class PostgresConnection:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, query, parameters=()):
+        return self.connection.execute(query.replace("?", "%s"), parameters)
+
+    def commit(self):
+        self.connection.commit()
+
+    def rollback(self):
+        self.connection.rollback()
+
+    def close(self):
+        self.connection.close()
 
 
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DATABASE)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        if USE_POSTGRES:
+            g.db = PostgresConnection(psycopg.connect(DATABASE_URL, row_factory=dict_row))
+        else:
+            g.db = sqlite3.connect(DATABASE)
+            g.db.row_factory = sqlite3.Row
+            g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
 
 
@@ -35,40 +64,72 @@ def close_db(exception=None):
         db.close()
 
 
+def ensure_donor_columns():
+    db = get_db()
+    if USE_POSTGRES:
+        db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS location TEXT NOT NULL DEFAULT ''")
+        db.execute("ALTER TABLE donors ADD COLUMN IF NOT EXISTS units_donated INTEGER NOT NULL DEFAULT 0")
+    else:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(donors)").fetchall()}
+        if "location" not in columns:
+            db.execute("ALTER TABLE donors ADD COLUMN location TEXT NOT NULL DEFAULT ''")
+        if "units_donated" not in columns:
+            db.execute("ALTER TABLE donors ADD COLUMN units_donated INTEGER NOT NULL DEFAULT 0")
+    db.commit()
+
+
+def adjust_inventory_for_group(group, delta):
+    if delta == 0:
+        return
+    db = get_db()
+    if group not in BLOOD_GROUPS:
+        return
+    db.execute("INSERT INTO blood_inventory (blood_group, units, updated_at) VALUES (?, 0, ?) ON CONFLICT(blood_group) DO NOTHING", (group, now()))
+    minimum = "GREATEST" if USE_POSTGRES else "MAX"
+    db.execute(f"UPDATE blood_inventory SET units = {minimum}(0, units + ?), updated_at = ? WHERE blood_group = ?", (delta, now(), group))
+    db.commit()
+
+
 def init_database():
     db = get_db()
-    db.executescript("""
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE,
+    id_type = "BIGSERIAL" if USE_POSTGRES else "INTEGER"
+    primary_key = "PRIMARY KEY" if USE_POSTGRES else "PRIMARY KEY AUTOINCREMENT"
+    statements = [
+    f"""CREATE TABLE IF NOT EXISTS users (
+        id {id_type} {primary_key}, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE,
         phone TEXT NOT NULL, password_hash TEXT NOT NULL, blood_group TEXT NOT NULL,
         dob TEXT NOT NULL, gender TEXT NOT NULL, address TEXT NOT NULL,
         role TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS donors (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+    )""",
+    f"""CREATE TABLE IF NOT EXISTS donors (
+        id {id_type} {primary_key}, user_id BIGINT NOT NULL, name TEXT NOT NULL,
         email TEXT NOT NULL, phone TEXT NOT NULL, blood_group TEXT NOT NULL, dob TEXT NOT NULL,
-        gender TEXT NOT NULL, address TEXT NOT NULL, last_donation TEXT, eligibility TEXT NOT NULL,
+        gender TEXT NOT NULL, address TEXT NOT NULL, location TEXT NOT NULL DEFAULT '',
+        last_donation TEXT, eligibility TEXT NOT NULL, units_donated INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS blood_inventory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, blood_group TEXT NOT NULL UNIQUE,
+    )""",
+    f"""CREATE TABLE IF NOT EXISTS blood_inventory (
+        id {id_type} {primary_key}, blood_group TEXT NOT NULL UNIQUE,
         units INTEGER NOT NULL DEFAULT 0 CHECK(units >= 0), updated_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS blood_requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, patient_name TEXT NOT NULL,
+    )""",
+    f"""CREATE TABLE IF NOT EXISTS blood_requests (
+        id {id_type} {primary_key}, user_id BIGINT NOT NULL, patient_name TEXT NOT NULL,
         patient_age INTEGER NOT NULL, gender TEXT NOT NULL, blood_group TEXT NOT NULL,
         units_required INTEGER NOT NULL CHECK(units_required > 0), hospital_name TEXT NOT NULL,
         hospital_contact TEXT NOT NULL, reason TEXT NOT NULL, urgency TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'Pending', created_at TEXT NOT NULL,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-    CREATE TABLE IF NOT EXISTS blood_banks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, address TEXT NOT NULL,
+    )""",
+    f"""CREATE TABLE IF NOT EXISTS blood_banks (
+        id {id_type} {primary_key}, name TEXT NOT NULL, address TEXT NOT NULL,
         phone TEXT NOT NULL, email TEXT NOT NULL, operating_hours TEXT NOT NULL
-    );
-    """)
+    )""",
+    ]
+    for statement in statements:
+        db.execute(statement)
+    ensure_donor_columns()
     for group in BLOOD_GROUPS:
-        db.execute("INSERT OR IGNORE INTO blood_inventory (blood_group, units, updated_at) VALUES (?, 0, ?)", (group, now()))
+        db.execute("INSERT INTO blood_inventory (blood_group, units, updated_at) VALUES (?, 0, ?) ON CONFLICT(blood_group) DO NOTHING", (group, now()))
     db.commit()
 
 
@@ -82,6 +143,10 @@ def valid_email(value):
 
 def valid_phone(value):
     return re.match(r"^[0-9+()\-\s]{7,20}$", value or "") is not None
+
+
+def valid_blood_group(value):
+    return value in BLOOD_GROUPS
 
 
 def login_required(view):
@@ -149,14 +214,16 @@ def register():
             try:
                 db = get_db()
                 cursor = db.execute("""INSERT INTO users (name,email,phone,password_hash,blood_group,dob,gender,address,role,created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?)""", (form["name"].strip(), form["email"].strip().lower(), form["phone"].strip(),
+                    VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id""", (form["name"].strip(), form["email"].strip().lower(), form["phone"].strip(),
                     generate_password_hash(form["password"]), form["blood_group"], form["dob"], form["gender"], form["address"].strip(), "user", now()))
+                user_id = cursor.fetchone()["id"]
                 db.commit()
                 session.clear()
-                session["user_id"] = cursor.lastrowid
+                session["user_id"] = user_id
                 flash("Registration successful. Welcome!", "success")
                 return redirect(url_for("dashboard"))
-            except sqlite3.IntegrityError:
+            except (sqlite3.IntegrityError, psycopg.IntegrityError):
+                db.rollback()
                 flash("An account with that email already exists.", "danger")
     return render_template("register.html")
 
@@ -199,15 +266,27 @@ def dashboard():
 def donor_add():
     if request.method == "POST":
         form = request.form
-        if not all(form.get(key, "").strip() for key in ["name", "email", "phone", "blood_group", "dob", "gender", "address", "eligibility"]):
+        required = ["name", "email", "phone", "blood_group", "dob", "gender", "address", "location", "eligibility", "units_donated"]
+        if not all(form.get(key, "").strip() for key in required):
             flash("Complete all donor fields.", "danger")
-        elif not valid_email(form["email"]) or not valid_phone(form["phone"]):
+        elif not valid_email(form["email"].strip()) or not valid_phone(form["phone"].strip()):
             flash("Enter a valid donor email and phone number.", "danger")
+        elif not valid_blood_group(form["blood_group"]):
+            flash("Select a valid blood group.", "danger")
         else:
+            try:
+                units = int(form["units_donated"])
+            except ValueError:
+                flash("Enter a valid number of blood units donated.", "danger")
+                return render_template("donor.html", donor=None)
+            if units < 0:
+                flash("Donated units cannot be negative.", "danger")
+                return render_template("donor.html", donor=None)
             db = get_db()
-            db.execute("""INSERT INTO donors (user_id,name,email,phone,blood_group,dob,gender,address,last_donation,eligibility,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (g.user["id"], form["name"].strip(), form["email"].strip(), form["phone"].strip(), form["blood_group"], form["dob"], form["gender"], form["address"].strip(), form.get("last_donation") or None, form["eligibility"], now()))
+            db.execute("""INSERT INTO donors (user_id,name,email,phone,blood_group,dob,gender,address,location,last_donation,eligibility,units_donated,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (g.user["id"], form["name"].strip(), form["email"].strip().lower(), form["phone"].strip(), form["blood_group"], form["dob"], form["gender"], form["address"].strip(), form["location"].strip(), form.get("last_donation") or None, form["eligibility"], units, now()))
             db.commit()
+            adjust_inventory_for_group(form["blood_group"], units)
             flash("Donor registered successfully.", "success")
             return redirect(url_for("donors"))
     return render_template("donor.html", donor=None)
@@ -225,10 +304,33 @@ def donor_edit(donor_id):
         return redirect(url_for("donors"))
     if request.method == "POST":
         form = request.form
-        db.execute("""UPDATE donors SET name=?,email=?,phone=?,blood_group=?,dob=?,gender=?,address=?,last_donation=?,eligibility=? WHERE id=?""", (form["name"], form["email"], form["phone"], form["blood_group"], form["dob"], form["gender"], form["address"], form.get("last_donation") or None, form["eligibility"], donor_id))
-        db.commit()
-        flash("Donor record updated.", "success")
-        return redirect(url_for("donors"))
+        required = ["name", "email", "phone", "blood_group", "dob", "gender", "address", "location", "eligibility", "units_donated"]
+        if not all(form.get(key, "").strip() for key in required):
+            flash("Complete all donor fields.", "danger")
+        elif not valid_email(form["email"].strip()) or not valid_phone(form["phone"].strip()):
+            flash("Enter a valid donor email and phone number.", "danger")
+        elif not valid_blood_group(form["blood_group"]):
+            flash("Select a valid blood group.", "danger")
+        else:
+            try:
+                units = int(form["units_donated"])
+            except ValueError:
+                flash("Enter a valid number of blood units donated.", "danger")
+                return render_template("donor.html", donor=donor)
+            if units < 0:
+                flash("Donated units cannot be negative.", "danger")
+                return render_template("donor.html", donor=donor)
+            prev_group = donor["blood_group"]
+            prev_units = donor["units_donated"]
+            db.execute("""UPDATE donors SET name=?,email=?,phone=?,blood_group=?,dob=?,gender=?,address=?,location=?,last_donation=?,eligibility=?,units_donated=? WHERE id=?""", (form["name"].strip(), form["email"].strip().lower(), form["phone"].strip(), form["blood_group"], form["dob"], form["gender"], form["address"].strip(), form["location"].strip(), form.get("last_donation") or None, form["eligibility"], units, donor_id))
+            db.commit()
+            if prev_group == form["blood_group"]:
+                adjust_inventory_for_group(form["blood_group"], units - prev_units)
+            else:
+                adjust_inventory_for_group(prev_group, -prev_units)
+                adjust_inventory_for_group(form["blood_group"], units)
+            flash("Donor record updated.", "success")
+            return redirect(url_for("donors"))
     return render_template("donor.html", donor=donor)
 
 
@@ -236,8 +338,9 @@ def donor_edit(donor_id):
 @login_required
 def donor_delete(donor_id):
     db = get_db()
-    donor = db.execute("SELECT user_id FROM donors WHERE id = ?", (donor_id,)).fetchone()
+    donor = db.execute("SELECT user_id, blood_group, units_donated FROM donors WHERE id = ?", (donor_id,)).fetchone()
     if donor and (donor["user_id"] == g.user["id"] or g.user["role"] == "admin"):
+        adjust_inventory_for_group(donor["blood_group"], -donor["units_donated"])
         db.execute("DELETE FROM donors WHERE id = ?", (donor_id,)); db.commit(); flash("Donor deleted.", "success")
     else:
         flash("You are not allowed to delete this record.", "danger")
@@ -337,7 +440,22 @@ def request_detail(request_id):
 def change_request_status(request_id, status):
     db = get_db(); record = db.execute("SELECT * FROM blood_requests WHERE id=?", (request_id,)).fetchone()
     if not record: flash("Request not found.", "danger"); return redirect(url_for("requests"))
-    if status == "Completed" and record["status"] != "Completed":
+
+    current_status = record["status"]
+    allowed_transitions = {
+        "Pending": {"Approved", "Rejected"},
+        "Approved": {"Completed", "Rejected"},
+        "Rejected": set(),
+        "Completed": set(),
+    }
+    if status not in {"Approved", "Rejected", "Completed"}:
+        flash("Invalid request status.", "danger"); return redirect(url_for("requests"))
+    if current_status == status:
+        flash("This request is already in that status.", "info"); return redirect(url_for("requests"))
+    if status not in allowed_transitions.get(current_status, set()):
+        flash("This status change is not allowed.", "danger"); return redirect(url_for("requests"))
+
+    if status == "Completed":
         compatible = COMPATIBILITY[record["blood_group"]]
         inventory_rows = db.execute("SELECT * FROM blood_inventory WHERE units > 0 ORDER BY units DESC").fetchall()
         available = sum(item["units"] for item in inventory_rows if item["blood_group"] in compatible)
@@ -372,6 +490,8 @@ def blood_banks():
     if request.method == "POST":
         if g.user["role"] != "admin": flash("Administrator access is required.", "danger")
         elif not all(request.form.get(field, "").strip() for field in ["name", "address", "phone", "email", "operating_hours"]): flash("Complete all blood bank fields.", "danger")
+        elif not valid_email(request.form["email"].strip()): flash("Enter a valid blood bank email.", "danger")
+        elif not valid_phone(request.form["phone"].strip()): flash("Enter a valid blood bank phone number.", "danger")
         else:
             db = get_db(); db.execute("INSERT INTO blood_banks (name,address,phone,email,operating_hours) VALUES (?,?,?,?,?)", tuple(request.form[field].strip() for field in ["name", "address", "phone", "email", "operating_hours"])); db.commit(); flash("Blood bank added.", "success")
     return render_template("blood_banks.html", banks=get_db().execute("SELECT * FROM blood_banks ORDER BY name").fetchall())
@@ -383,6 +503,7 @@ def profile():
     if request.method == "POST":
         form = request.form
         if not valid_phone(form.get("phone")) or not form.get("name", "").strip(): flash("Enter a valid name and phone number.", "danger")
+        elif not valid_blood_group(form.get("blood_group")): flash("Select a valid blood group.", "danger")
         else:
             db = get_db(); db.execute("UPDATE users SET name=?,phone=?,blood_group=?,dob=?,gender=?,address=? WHERE id=?", (form["name"].strip(), form["phone"].strip(), form["blood_group"], form["dob"], form["gender"], form["address"].strip(), g.user["id"])); db.commit(); flash("Profile updated.", "success"); return redirect(url_for("profile"))
     return render_template("profile.html")

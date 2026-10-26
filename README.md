@@ -1,6 +1,6 @@
 # Blood Bank Management System
 
-A college-level blood bank application built with Python, Flask, SQLite, Jinja2, Bootstrap 5, and vanilla JavaScript. It demonstrates authentication, donor records, inventory, blood requests, compatibility guidance, and administrator workflows. It is educational software; real transfusion decisions must be made by qualified medical professionals.
+A college-level blood bank application built with Python, Flask, SQLite for local development, PostgreSQL for hosted deployments, Jinja2, Bootstrap 5, and vanilla JavaScript. It demonstrates authentication, donor records, inventory, blood requests, compatibility guidance, and administrator workflows. It is educational software; real transfusion decisions must be made by qualified medical professionals.
 
 ## Features
 - Registration, login, logout, hashed passwords, sessions, and role-based admin authorization.
@@ -32,6 +32,23 @@ Run `init_db.py` once with `ADMIN_EMAIL` and `ADMIN_PASSWORD` set. The password 
 3. Deploy the Blueprint. The app initializes its SQLite database at startup and serves it with Gunicorn.
 
 The free service uses ephemeral storage and may spin down when idle. SQLite accounts, donor records, requests, and inventory can be lost on restart, redeploy, or instance replacement. This setup is suitable for a demo only; use a paid service with persistent storage or a managed database for data that must be retained.
+
+## Deploy on Vercel
+Vercel runs Flask as a serverless function. Configure PostgreSQL for persistent user, donor, request, and inventory data; the local SQLite database is only used when `DATABASE_URL` is not set outside Vercel.
+
+1. Create a PostgreSQL database with a hosted provider and copy its connection URL. Keep the URL private.
+2. Set `DATABASE_URL` in the Vercel project environment variables, along with a random `SECRET_KEY`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD`.
+3. Before deploying, initialize the tables and admin account against that same database from a trusted local machine. In PowerShell:
+   ```powershell
+   $env:DATABASE_URL = "your-private-postgresql-connection-url"
+   $env:ADMIN_EMAIL = "admin@example.com"
+   $env:ADMIN_PASSWORD = "a-strong-password"
+   python init_db.py
+   ```
+   Do not commit the connection URL or password. `init_db.py` creates the tables and adds the admin account if that email does not already exist.
+4. Push the repository to GitHub, import it into Vercel, and deploy. `vercel.json` routes requests through `api/index.py`.
+
+Vercel requires both `DATABASE_URL` and `SECRET_KEY`; it will fail clearly rather than silently using temporary SQLite storage if either is missing. Existing records in `database.db` are not automatically copied to PostgreSQL.
 
 ## Project structure
 `app.py` contains routes, validation, authorization, and database access. `init_db.py` creates the first admin. Templates provide the pages, while `static/css/style.css` and `static/js/script.js` provide shared presentation and behavior. `database.db` is created automatically on first run.

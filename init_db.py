@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import psycopg
 from werkzeug.security import generate_password_hash
 from app import app, get_db, init_database, now
 
@@ -14,5 +15,6 @@ with app.app_context():
         db.execute("INSERT INTO users (name,email,phone,password_hash,blood_group,dob,gender,address,role,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", ("System Administrator", email.lower(), "0000000000", generate_password_hash(password), "O+", "2000-01-01", "Other", "Local blood bank office", "admin", now()))
         db.commit()
         print("Admin account created for " + email.lower())
-    except sqlite3.IntegrityError:
+    except (sqlite3.IntegrityError, psycopg.IntegrityError):
+        db.rollback()
         print("That admin email already exists; no account was changed.")
