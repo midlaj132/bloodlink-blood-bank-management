@@ -5,7 +5,7 @@ A college-level blood bank application built with Python, Flask, SQLite for loca
 ## Features
 - Registration, login, logout, hashed passwords, sessions, and role-based admin authorization.
 - Donor registration, search, filters, editing, and ownership checks.
-- Donation recording checks for minimum age 18, at least 6 hours' sleep, and a 6-month interval after the previous donation. The app does not determine medical eligibility or perform screening.
+- The donor form displays an automatic eligibility status based on age 18+, at least 6 hours' sleep, and a 6-month interval after the previous donation. This is not medical screening or a determination of medical eligibility.
 - Eight blood groups with non-negative inventory controls.
 - Requests with Pending, Approved, Rejected, and Completed statuses.
 - Compatible blood group display and automatic inventory deduction on completion.
